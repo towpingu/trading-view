@@ -1,0 +1,332 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © towpingu
+
+//@version=6
+
+// ******************************************************
+//
+// Krillins core Long MAs; MA100, EMA200, MA300
+// - Include the EMA200 for the next up primary trend as opposed to just 4hEMA200.
+// - Alerts for Long MA taps after a specified number of bars since the last tap
+//
+// ******************************************************
+
+indicator(title="Krillin based Long MA Indicator and Alerts by Rich", shorttitle="Long MAs (Rich)", overlay=true)
+
+// ******************************************************
+//
+// Inputs
+//
+// ******************************************************
+
+var GRP0 = "---------- MAs ----------"
+next_ema200 = input.bool(defval=true, title='Show Next EMA200', inline='Display', tooltip='5m -> 15m -> 1h -> 4h -> 1d -> 1w', group = GRP0)
+enable_json_alerts = input(true, "Generate Json Alerts?", tooltip = "Plaintext if disabled", group = GRP0)
+
+var GRP1 = "---------- MA Prediction ----------"
+bars_to_predict = input(20, "Bars to Predict", group = GRP1)
+smoothing_in_prediction = input(0.95, "Smoothing Rate", group = GRP1)
+
+var GRP2 = "---------- Long MA Taps ----------"
+ma100_tap = input(true, "MA100 Tap", group = GRP2)
+ma100_tap_bars_since_lookback = input(50, "Bars Since Tapped", group = GRP2)
+ema200_tap = input(true, "EMA200 Tap", group = GRP2)
+ema200_tap_bars_since_lookback = input(50, "Bars Since Tapped", group = GRP2)
+ma300_tap = input(true, "MA300 Tap", group = GRP2)
+ma300_tap_bars_since_lookback = input(50, "Bars Since Tapped", group = GRP2)
+
+var GRP3 = "---------- MA Definitions ----------"
+ma100Source = input(defval = close, group = GRP3)
+ma100Length = input.int(defval = 100, minval = 1, group = GRP3)
+ma300Source = input(defval = close, group = GRP3)
+ma300Length = input.int(defval = 300, minval = 1, group = GRP3)
+// ema200 - actually SMMA99
+ema200Source = input(defval = close, group = GRP3)
+ema200Length = input.int(defval = 99, minval=1, group = GRP3) 
+
+ma100 = ta.sma(ma100Source, ma100Length)
+plot(series=ma100, title="MA100", color=color.new(#808080, 50), linewidth=1, style=plot.style_cross) // #512da8
+
+// ******************************************************
+//
+// Common Calculations
+//
+// ******************************************************
+
+// Function to check if a string is numeric
+isNumeric(string) =>
+    floatValue = str.tonumber(string)
+    not na(floatValue)
+
+// Function to format the timeframe period
+formatTimeframePeriod(period) =>
+    if isNumeric(period)
+        value = str.tonumber(period)
+        if value < 60
+            period + "m"
+        else
+            str.tostring(math.floor(value / 60)) + "h"
+    else
+        period
+
+// Get the formatted timeframe period
+formattedTimeframePeriod = formatTimeframePeriod(timeframe.period)
+fc_ticker = syminfo.ticker(syminfo.tickerid)
+
+// ******************************************************
+// ******************************************************
+// ******************************************************
+//
+// EMAs
+//
+// ******************************************************
+// ******************************************************
+// ******************************************************
+
+// ******************************************************
+//
+// Next Up Timeframe
+//
+// ******************************************************
+
+float chartTFInMinutes = timeframe.in_seconds() / 60 
+
+// calculations for options by timeframe
+string nextEMA200InMinutes = "0"
+string nextEMA200TF = "Unchanged"
+
+if chartTFInMinutes <= 5
+	nextEMA200InMinutes := "15"
+	nextEMA200TF := "15m"
+else if chartTFInMinutes <= 15
+	nextEMA200InMinutes := "60"
+	nextEMA200TF := "1h"
+else if chartTFInMinutes <= 60
+	nextEMA200InMinutes := "240"
+	nextEMA200TF := "4h"
+else if chartTFInMinutes <= 240
+	nextEMA200InMinutes := "1440"
+	nextEMA200TF := "1d"
+else if chartTFInMinutes <= 1440
+	nextEMA200InMinutes := "W"
+	nextEMA200TF := "1w"
+else
+	nextEMA200InMinutes := "W"
+	nextEMA200TF := "1w"
+
+// for including next main TF up EMA200
+if next_ema200 != true
+	nextEMA200TF := "Unchanged"
+	nextEMA200InMinutes := "0"
+
+// render box with MA changes
+var table t = table.new(position.bottom_left, 1, 1)
+string ema200txt = next_ema200 ? "Next EMA200 TF: " + nextEMA200TF : "" + " |\ " + formatTimeframePeriod(nextEMA200InMinutes)
+if barstate.isfirst
+    table.cell(t, 0, 0, ema200txt, text_halign=text.align_left)
+else if barstate.islast
+    table.cell_set_text(t, 0, 0, ema200txt)
+
+// ******************************************************
+//
+// Plot Long MAs
+//
+// ******************************************************
+	
+EMA200() => 
+	ema200 = ta.sma(ema200Source, ema200Length)
+    ema200 := na(ema200[1]) ? ema200 : (ema200[1] * (ema200Length - 1) + ema200Source) / ema200Length
+
+nextEMA200() =>
+	nextema200 = 0.0
+	nextema200 := request.security(syminfo.tickerid,nextEMA200InMinutes, EMA200())
+
+// Calculate the modified series for moving averages
+//ma100 = ta.sma(ma100Source, ma100Length)
+ema200_modified = EMA200()
+ma300 = ta.sma(ma300Source, ma300Length)
+nextema200 = nextEMA200()
+
+// Draw lines
+//plot(series=ma100, title="MA100", color=color.new(#808080, 50), linewidth=1, style=plot.style_cross) // #512da8
+plot(series=ema200_modified, title="EMA200", color=color.new(#808080, 40), linewidth=1) // #e100ffc7
+plot(series=ma300, title="MA300", color=color.new(#808080, 50), linewidth=1, style=plot.style_circles) // #c900c9
+plot(series=next_ema200 ? nextema200 : na, title="nextEMA200", color=color.new(#808080, 60), linewidth=1)
+
+// ******************************************************
+//
+// MA Predication
+//
+// ******************************************************
+
+if (barstate.islastconfirmedhistory)
+    predict_ma100_current=ma100
+    predict_ema200_current=ema200_modified 
+    predict_ma300_current=ma300
+    predict_ma100_last=ma100[1]
+    predict_ema200_last=ema200_modified[1]
+    predict_ma300_last=ma300[1]
+
+    for i = 1 to bars_to_predict
+        x1=bar_index+i-1
+        x2=bar_index+i
+        
+        predict_ma100_temp_current=predict_ma100_current
+        predict_ma100_current:=predict_ma100_temp_current + ((predict_ma100_temp_current - predict_ma100_last) * smoothing_in_prediction)
+        predict_ema200_temp_current=predict_ema200_current
+        predict_ema200_current:=predict_ema200_current + ((predict_ema200_temp_current - predict_ema200_last) * smoothing_in_prediction)
+        predict_ma300_temp_current=predict_ma300_current
+        predict_ma300_current:=predict_ma300_current + ((predict_ma300_temp_current - predict_ma300_last) * smoothing_in_prediction)
+
+        predict_ma100_last:=predict_ma100_temp_current
+        predict_ema200_last:=predict_ema200_temp_current
+        predict_ma300_last:=predict_ma300_temp_current
+
+        line.new(x1,predict_ma100_last,x2, predict_ma100_current, color=color.new(#808080, 50), style=line.style_dotted, width=1)
+        line.new(x1,predict_ema200_last,x2, predict_ema200_current, color=color.new(#808080, 50), style=line.style_dotted, width=1)
+        line.new(x1,predict_ma300_last,x2, predict_ma300_current, color=color.new(#808080, 50), style=line.style_dotted, width=1)
+
+// ******************************************************
+// ******************************************************
+// ******************************************************
+//
+// Trend Alerts
+//
+// ******************************************************
+// ******************************************************
+// ******************************************************
+
+float previousClose = close[1]
+
+// ******************************************************
+//
+// MA 100 Taps
+//
+// ******************************************************
+
+var int ma100_bars_since_tap = 0
+ma100_tap_condition = false
+if (high >= ma100 and low <= ma100) or (low <= ma100 and high >= ma100)
+    if (ma100_bars_since_tap >= ma100_tap_bars_since_lookback)
+		ma100_tap_condition := true
+	ma100_bars_since_tap := 0
+else
+    ma100_bars_since_tap := ma100_bars_since_tap + 1
+
+ma100_tap_direction = previousClose < ma100 ? "From Below" : "From Above"
+
+plotshape(series=ma100_tap_condition and previousClose < ma100, location=location.abovebar, color=color.green, style=shape.diamond, title="MA100 Tap Signal")
+plotshape(series=ma100_tap_condition and previousClose >= ma100, location=location.belowbar, color=color.green, style=shape.diamond, title="MA100 Tap Signal")
+
+if (ma100_tap_condition)
+    if (enable_json_alerts)
+        alert('{"content":"' + fc_ticker + ' ' + formattedTimeframePeriod + ' ' + 'MA100 Tapped ' + ma100_tap_direction + '"}', alert.freq_once_per_bar)
+    else
+        alert(syminfo.ticker + " " + timeframe.period + " MA100 Tapped " + ma100_tap_direction, alert.freq_once_per_bar)
+
+// ******************************************************
+//
+// EMA 200 Taps
+//
+// ******************************************************
+
+var int ema200_bars_since_tap = 0
+ema200_tap_condition = false
+if (high >= ema200_modified and low <= ema200_modified) or (low <= ema200_modified and high >= ema200_modified)
+    if (ema200_bars_since_tap >= ema200_tap_bars_since_lookback)
+		ema200_tap_condition := true
+	ema200_bars_since_tap := 0
+else
+    ema200_bars_since_tap := ema200_bars_since_tap + 1
+
+ema200_tap_direction = previousClose < ema200_modified ? "From Below" : "From Above"
+
+plotshape(series=ema200_tap_condition and previousClose < ema200_modified, location=location.abovebar, color=color.blue, style=shape.square, title="EMA200 Tap Signal")
+plotshape(series=ema200_tap_condition and previousClose >= ema200_modified, location=location.belowbar, color=color.blue, style=shape.square, title="EMA200 Tap Signal")
+
+if (ema200_tap_condition)
+    if (enable_json_alerts)
+        alert('{"content":"' + fc_ticker + ' ' + formattedTimeframePeriod + ' ' + 'EMA200 Tapped ' + ema200_tap_direction + '"}', alert.freq_once_per_bar)
+    else
+        alert(syminfo.ticker + " " + timeframe.period + " EMA200 Tapped " + ema200_tap_direction, alert.freq_once_per_bar)
+
+// ******************************************************
+//
+// MA 300 Taps
+//
+// ******************************************************
+
+var int ma300_bars_since_tap = 0
+ma300_tap_condition = false
+if (high >= ma300 and low <= ma300) or (low <= ma300 and high >= ma300)
+    if (ma300_bars_since_tap >= ma300_tap_bars_since_lookback)
+		ma300_tap_condition := true
+	ma300_bars_since_tap := 0
+else
+    ma300_bars_since_tap := ma300_bars_since_tap + 1
+
+ma300_tap_direction = previousClose < ma300 ? "From Below" : "From Above"
+
+plotshape(series=ma300_tap_condition and previousClose < ma300, location=location.abovebar, color=color.green, style=shape.diamond, title="MA300 Tap Signal")
+plotshape(series=ma300_tap_condition and previousClose >= ma300, location=location.belowbar, color=color.green, style=shape.diamond, title="MA300 Tap Signal")
+
+if (ma300_tap_condition)
+    if (enable_json_alerts)
+        alert('{"content":"' + fc_ticker + ' ' + formattedTimeframePeriod + ' ' + 'MA300 Tapped ' + ma300_tap_direction + '"}', alert.freq_once_per_bar)
+    else
+        alert(syminfo.ticker + " " + timeframe.period + " MA300 Tapped " + ma300_tap_direction, alert.freq_once_per_bar)
+
+
+// ******************************************************
+// ******************************************************
+// ******************************************************
+//
+// Testing MA Formation
+//
+// ******************************************************
+// ******************************************************
+// ******************************************************
+
+
+// Parameters
+lookback = 10
+
+// Calculate slopes and distances
+slope_ma100 = ma100 - ma100[lookback]
+slope_ma100_bar_spacing = syminfo.mintick * bar_index * lookback // Approximate horizontal distance
+slope_ma100_angle_radians = math.atan(slope_ma100 / slope_ma100_bar_spacing)
+slope_ma100_angle_degrees = slope_ma100_angle_radians * 180 / math.pi
+//TODO: modify this to calculate the high and low of the last 200 bars = height of calc box. height of last 10 bars
+//log.info("spacing " + str.tostring(slope_ma100_bar_spacing))
+//log.info("height " + str.tostring(slope_ma100))
+//plotshape(series=math.abs(slope_ma100_angle_degrees) < 5, location=location.abovebar, color=color.blue, style=shape.arrowdown, title="Test")
+slope_ma300 = ta.linreg(ma300, lookback, 0)
+ma_distance = math.abs(ma100 - ma300)
+
+// Determine states
+expanding = ma_distance > ma_distance[lookback]
+contracting = ma_distance < ma_distance[lookback]
+flat = math.abs(slope_ma100 - slope_ma300) < 1
+
+// Calculate bars since last crossover and % price change since crossover
+cross_over_condition_ma100_ma300 = ta.cross(ma100, ma300)
+cross_over_condition_ma100_ema200 = ta.cross(ma100, ema200_modified)
+cross_over_condition_ema200_ma300 = ta.cross(ema200_modified, ma300)
+cross_over_condition = cross_over_condition_ma100_ma300 or cross_over_condition_ma100_ema200 or cross_over_condition_ema200_ma300
+last_crossover = ta.barssince(cross_over_condition)
+chop = last_crossover < lookback ? true : false
+// crossover_price = ta.valuewhen(cross_over_condition, close, 0)
+// price_change_since_crossover = last_crossover >= 0 ? ((close - crossover_price) / crossover_price) * 100 : na
+
+// Background colour
+bg_color = color.new(color.gray, 95)
+if chop == true
+    bg_color := color.new(color.yellow, 85)
+else if expanding == true
+    bg_color := color.new(color.green, 85)
+else if contracting == true
+    bg_color := color.new(color.red, 85)
+//else if flat == true
+//    bg_color := color.new(color.orange, 85)
+
+//bgcolor(bg_color)
