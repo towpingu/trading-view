@@ -1,0 +1,340 @@
+//@version=6
+
+// ******************************************************
+//
+// Krillins core Trend EMAs; EMA13, EMA21
+// - EMA34 as standard but very transparent
+// - Ability to show primary MAs only e.g. 30m chart to show 1h MAs, 2h chart to show 4h MAs.
+// - Alerts for trend continuation setups
+// - Alerts for trend reclaim setups
+//
+// ******************************************************
+
+indicator(title="Krillin based Trend EMA Indicator and Alerts by Rich", shorttitle="Trend EMAs (Rich)", overlay=true)
+
+// ******************************************************
+//
+// Inputs
+//
+// ******************************************************
+
+var GRP0 = '---------- MAs ----------'
+primary_MAs_only = input.bool(defval = false, title = 'Primary MAs Only', inline = 'Display', tooltip = '5m, 15m, 1h, 4h, 1d, 1w MAs Only', group = GRP0)
+enable_json_alerts = input(true, 'Generate Json Alerts?', tooltip = 'Plaintext if disabled', group = GRP0)
+crossover_lookback = input(15, 'No Trend Crossover Lookback', group = GRP0)
+
+var GRP1 = "---------- MA Prediction ----------"
+bars_to_predict = input(10, "Bars to Predict", group = GRP1)
+smoothing_in_prediction = input(0.85, "Smoothing Rate", group = GRP1)
+
+var GRP2 = '---------- Trend Continuation ----------'
+enable_trend_continuation = input(true, 'Enable Trend Continuation?', group = GRP2)
+continuation_angle_lookback = input(5, 'EMA13 Slope Lookback', group = GRP2)
+continuation_ema21_lookback = input(10, 'EMA21 Close Though Lookback', group = GRP2)
+stoch_rsi_upper_bound = input(80, 'Stoch RSI Short Trigger', group = GRP2)
+stoch_rsi_lower_bound = input(20, 'Stoch RSI Long Trigger', group = GRP2)
+
+var GRP3 = '---------- Trend Reclaim ----------'
+enable_trend_reclaim = input(true, 'Enable Trend Reclaim?', group = GRP3)
+reclaim_ema21_close_lookback = input(10, 'EMA21 Close Though Lookback', group = GRP3)
+reclaim_angle_lookback = input(3, 'EMA13 Slope Lookback', group = GRP3)
+
+var GRP4 = "---------- Trend Definitions ----------"
+ema13Source = input(defval = close, group = GRP4)
+ema13Length = input.int(defval = 13, minval = 1, group = GRP4)
+ema21Source = input(defval = close, group = GRP4)
+ema21Length = input.int(defval = 21, minval = 1, group = GRP4)
+// ema200 - actually SMMA99
+ema34Source = input(defval = close, group = GRP4)
+ema34Length = input.int(defval = 34, minval=1, group = GRP4) 
+
+
+// ******************************************************
+// ******************************************************
+// ******************************************************
+//
+// EMAs
+//
+// ******************************************************
+// ******************************************************
+// ******************************************************
+
+float chartTFInMinutes = timeframe.in_seconds() / 60
+
+// calculations for options by timeframe
+float shortMAsInMinutes = chartTFInMinutes
+float primaryTrendOnlyModifier = 1
+string shortMAsTF = 'Unchanged'
+float opacityModifier = 40
+
+if chartTFInMinutes <= 5
+    shortMAsInMinutes := 5
+    shortMAsTF := '5m'
+else if chartTFInMinutes <= 15
+    shortMAsInMinutes := 15
+    shortMAsTF := '15m'
+else if chartTFInMinutes <= 60
+    shortMAsInMinutes := 60
+    shortMAsTF := '1h'
+else if chartTFInMinutes <= 240
+    shortMAsInMinutes := 240
+    shortMAsTF := '4h'
+else if chartTFInMinutes <= 1440
+    shortMAsInMinutes := 1440
+    shortMAsTF := '1d'
+else
+    shortMAsInMinutes := 10080
+    shortMAsTF := '1w'
+
+// for modifying short MAs to next main TF up
+if primary_MAs_only == true
+    primaryTrendOnlyModifier := shortMAsInMinutes / chartTFInMinutes
+    if primaryTrendOnlyModifier != 1
+        opacityModifier := opacityModifier + 25
+        opacityModifier
+else
+    shortMAsTF := 'Unchanged'
+    shortMAsInMinutes := chartTFInMinutes
+    shortMAsInMinutes
+
+// render box with MA changes
+var table t = table.new(position.bottom_right, 1, 1)
+string shortMAtxt = primary_MAs_only ? 'Short MA TF: ' + shortMAsTF : ''
+string txt = shortMAtxt
+if barstate.isfirst
+    table.cell(t, 0, 0, txt, text_halign = text.align_left)
+else if barstate.islast
+    table.cell_set_text(t, 0, 0, txt)
+
+// Calculate the modified series for moving averages
+ema13_modified = ta.ema(ema13Source, int(ema13Length * primaryTrendOnlyModifier))
+ema21_modified = ta.ema(ema21Source, int(ema21Length * primaryTrendOnlyModifier))
+ema34_modified = ta.ema(ema34Source, int(ema34Length * primaryTrendOnlyModifier))
+
+// Draw lines
+ema13_plot = plot(series = ema13_modified, title = 'EMA13', color = color.new(#a0a0a0, 100), linewidth = 1) // #25ff00
+ema21_plot = plot(series = ema21_modified, title = 'EMA21', color = color.new(#a0a0a0, 100), linewidth = 1, style = plot.style_stepline) // #00ffd4
+fill(ema13_plot, ema21_plot, color=color.new(#a0a0a0, 80), title="EMA13/21 Band")
+plot(series = ema34_modified, title = 'EMA34', color = color.new(#a0a0a0, 90), linewidth = 1) //, style=plot.style_cross)
+
+// ******************************************************
+//
+// MA Prediction
+//
+// ******************************************************
+
+if (barstate.islastconfirmedhistory)
+    ema13_modified_current=ema13_modified
+    ema21_modified_current=ema21_modified 
+    ema34_modified_current=ema34_modified
+    ema13_modified_last=ema13_modified[1]
+    ema21_modified_last=ema21_modified[1]
+    ema34_modified_last=ema34_modified[1]
+
+    for i = 1 to bars_to_predict
+        x1=bar_index+i-1
+        x2=bar_index+i
+        
+        ema13_modified_current_temp=ema13_modified_current
+        ema13_modified_current:=ema13_modified_current_temp + ((ema13_modified_current_temp - ema13_modified_last) * smoothing_in_prediction)
+        ema21_modified_current_temp=ema21_modified_current
+        ema21_modified_current:=ema21_modified_current + ((ema21_modified_current_temp - ema21_modified_last) * smoothing_in_prediction)
+        ema34_modified_current_temp=ema34_modified_current
+        ema34_modified_current:=ema34_modified_current + ((ema34_modified_current_temp - ema34_modified_last) * smoothing_in_prediction)
+
+        ema13_modified_last:=ema13_modified_current_temp
+        ema21_modified_last:=ema21_modified_current_temp
+        ema34_modified_last:=ema34_modified_current_temp
+
+        line.new(x1,ema13_modified_last,x2, ema13_modified_current, color=color.new(#808080, 50), style=line.style_dotted, width=1)
+        line.new(x1,ema21_modified_last,x2, ema21_modified_current, color=color.new(#808080, 50), style=line.style_dotted, width=1)
+        line.new(x1,ema34_modified_last,x2, ema34_modified_current, color=color.new(#808080, 50), style=line.style_dotted, width=1)
+
+// ******************************************************
+// ******************************************************
+// ******************************************************
+//
+// Trend Alerts
+//
+// ******************************************************
+// ******************************************************
+// ******************************************************
+
+// ******************************************************
+//
+// Common Calculations
+//
+// ******************************************************
+
+ema13_length = 13
+ema21_length = 21
+stoch_length = 14
+stoch_smoothK = 3
+stoch_smoothD = 3
+ema13 = ta.ema(close, ema13_length)
+ema21 = ta.ema(close, ema21_length)
+
+// Calculate RSI and Stochastic RSI
+rsi_value = ta.rsi(close, stoch_length)
+stoch_k = ta.sma(ta.stoch(rsi_value, rsi_value, rsi_value, stoch_length), stoch_smoothK)
+stoch_d = ta.sma(stoch_k, stoch_smoothD)
+
+// EMA13/21 crossover
+ema_crossed_over = ta.crossover(ema13, ema21) or ta.crossunder(ema13, ema21)
+crossed_over_condition = ta.barssince(ema_crossed_over) > crossover_lookback
+
+// Function to check if a string is numeric
+isNumeric(string) =>
+    floatValue = str.tonumber(string)
+    not na(floatValue)
+
+// Function to format the timeframe period
+formatTimeframePeriod(period) =>
+    if isNumeric(period)
+        value = str.tonumber(period)
+        if value < 60
+            period + 'm'
+        else
+            str.tostring(math.floor(value / 60)) + 'h'
+    else
+        period
+
+// Get the formatted timeframe period
+formattedTimeframePeriod = formatTimeframePeriod(timeframe.period)
+fc_ticker = syminfo.ticker(syminfo.tickerid)
+
+
+
+
+// ******************************************************
+//
+// Trend Continuation
+//
+// ******************************************************
+
+// Check if the last candle closed between EMA13 and EMA21
+close_between_ema = close > ema21 and ema13 > ema21 or close < ema13 and ema13 < ema21
+
+// Check if none of the previous x candles closed below EMA21
+none_closed_below_ema21 = true
+none_closed_above_ema21 = true
+for i = 0 to continuation_ema21_lookback - 1 by 1
+    if close[i] < ema21[i]
+        none_closed_below_ema21 := false
+        none_closed_below_ema21
+    if close[i] > ema21[i]
+        none_closed_above_ema21 := false
+        none_closed_above_ema21
+
+// Conditions for long and short signals
+stoch_rsi_long_condition = stoch_k < stoch_rsi_lower_bound and stoch_d < stoch_rsi_lower_bound
+stoch_rsi_short_condition = stoch_k > stoch_rsi_upper_bound and stoch_d > stoch_rsi_upper_bound
+
+// Check EMA13 slope
+continuation_ema13_avg_change = (ema21[0] - ema21[continuation_angle_lookback]) / continuation_angle_lookback
+continuation_ema13_ascending = continuation_ema13_avg_change > 0
+continuation_ema13_descending = continuation_ema13_avg_change < 0
+
+continuation_long_condition = enable_trend_continuation and ema13 > ema21 and stoch_rsi_long_condition and not continuation_ema13_descending and crossed_over_condition and close_between_ema and none_closed_below_ema21
+continuation_short_condition = enable_trend_continuation and ema13 < ema21 and stoch_rsi_short_condition and not continuation_ema13_ascending and crossed_over_condition and close_between_ema and none_closed_above_ema21
+
+// Highlight where trend continuation occurs
+//bgcolor(continuation_long_condition ? color.new(color.green, 90) : na, title="Long Condition Background")
+plotshape(series = continuation_long_condition, location = location.belowbar, color = color.green, style = shape.labelup, title = 'Long Signal')
+//bgcolor(continuation_short_condition ? color.new(color.red, 90) : na, title="Short Condition Background")
+plotshape(series = continuation_short_condition, location = location.abovebar, color = color.red, style = shape.labeldown, title = 'Short Signal')
+
+// Generate alerts when conditions are met
+if continuation_long_condition // and ta.barssince(continuation_long_condition) > 5)
+    if enable_json_alerts
+        alert('{"content":"' + fc_ticker + ' ' + formattedTimeframePeriod + ' ' + 'Uptrend Continuation' + '"}', alert.freq_once_per_bar_close)
+    else
+        alert(syminfo.ticker + ' ' + timeframe.period + ' Uptrend Continuation', alert.freq_once_per_bar_close)
+
+if continuation_short_condition // and ta.barssince(continuation_short_condition) > 5)
+    if enable_json_alerts
+        alert('{"content":"' + fc_ticker + ' ' + formattedTimeframePeriod + ' ' + 'Downtrend Continuation' + '"}', alert.freq_once_per_bar_close)
+    else
+        alert(syminfo.ticker + ' ' + timeframe.period + ' Downtrend Continuation', alert.freq_once_per_bar_close)
+
+// ******************************************************
+//
+// Trend Reclaim 
+//
+// ******************************************************
+
+// Check if the current candle closed above ema13 (holds the break), the previous candle body was either side on EMA21, 3 candles ago must be the other side of ema13 (show a move)
+long_candle_configuration = low > ema13 and close[1] > ema21 and open[1] < ema21 and close[3] < ema13
+short_candle_configuration = high < ema13 and close[1] < ema21 and open[1] > ema21 and close[3] > ema13
+
+// check if the emas are in the right order
+reclaim_long_configuration = ema21 > ema13
+reclaim_short_configuration = ema13 > ema21
+
+// look back to see if any prior closes breach ema21 (starts from 2 i.e. before the candle that broke ema21)
+reclaim_long_lookback_below_ema21 = false
+for i = 2 to reclaim_ema21_close_lookback by 1
+    if close[i] > ema21[i]
+        reclaim_long_lookback_below_ema21 := true
+        reclaim_long_lookback_below_ema21
+reclaim_short_lookback_above_ema21 = false
+for i = 2 to reclaim_ema21_close_lookback by 1
+    if close[i] < ema21[i]
+        reclaim_short_lookback_above_ema21 := true
+        reclaim_short_lookback_above_ema21
+
+// Check EMA13 slope
+reclaim_ema13_avg_change = (ema21[0] - ema21[reclaim_angle_lookback]) / reclaim_angle_lookback
+reclaim_ema13_ascending = reclaim_ema13_avg_change > 0
+reclaim_ema13_descending = reclaim_ema13_avg_change < 0
+
+reclaim_long_condition = enable_trend_reclaim and long_candle_configuration and crossed_over_condition and reclaim_long_configuration and not reclaim_long_lookback_below_ema21
+reclaim_short_condition = enable_trend_reclaim and short_candle_configuration and crossed_over_condition and reclaim_short_configuration and not reclaim_short_lookback_above_ema21
+
+// Highlight where trend continuation occurs
+//bgcolor(reclaim_long_condition ? color.new(color.green, 90) : na, title="Long Condition Background")
+plotshape(series = reclaim_long_condition, location = location.belowbar, color = color.green, style = shape.triangleup, title = 'Long Signal')
+//bgcolor(reclaim_short_condition ? color.new(color.red, 90) : na, title="Short Condition Background")
+plotshape(series = reclaim_short_condition, location = location.abovebar, color = color.red, style = shape.triangledown, title = 'Short Signal')
+
+// Generate alerts when conditions are met
+if reclaim_long_condition // and ta.barssince(reclaim_long_condition) > 5)
+    //log.info("hello")
+    if enable_json_alerts
+        alert('{"content":"' + fc_ticker + ' ' + formattedTimeframePeriod + ' ' + 'Uptrend Reclaim' + '"}', alert.freq_once_per_bar_close)
+    else
+        alert(syminfo.ticker + ' ' + timeframe.period + ' Uptrend Reclaim', alert.freq_once_per_bar_close)
+
+if reclaim_short_condition // and ta.barssince(reclaim_short_condition) > 5)
+    if enable_json_alerts
+        alert('{"content":"' + fc_ticker + ' ' + formattedTimeframePeriod + ' ' + 'Downtrend Reclaim' + '"}', alert.freq_once_per_bar_close)
+    else
+        alert(syminfo.ticker + ' ' + timeframe.period + ' Downtrend Reclaim', alert.freq_once_per_bar_close)
+
+// ******************************************************
+//
+// HALO 
+//
+// ******************************************************
+
+// Calculate candle components
+candle_size = high - low
+upper_wick = high - math.max(open, close)
+lower_wick = math.min(open, close) - low
+body_size = math.abs(close - open)
+
+// Define wick thresholds
+long_wick_threshold = 0.7 * candle_size
+small_wick_threshold = 0.15 * candle_size
+
+// Calculate EMAs
+trend_above_price = close < ema13 and ema13 < ema21
+trend_below_price = close > ema13 and ema13 > ema21
+
+// Conditions for identifying the pattern
+high_test = upper_wick > long_wick_threshold and lower_wick <= small_wick_threshold and trend_above_price and none_closed_above_ema21 and crossed_over_condition
+low_test = lower_wick > long_wick_threshold and upper_wick <= small_wick_threshold and trend_below_price and none_closed_below_ema21 and crossed_over_condition
+
+// Plot markers
+plotshape(high_test, location=location.abovebar, color=color.purple, style=shape.labeldown, title="High Test")
+plotshape(low_test, location=location.belowbar, color=color.fuchsia, style=shape.labelup, title="Low Test")
