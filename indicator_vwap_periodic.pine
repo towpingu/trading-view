@@ -1,0 +1,228 @@
+// @version=6
+// Based on standard VWAP indicator
+indicator(title="Periodic VWAP (Rich)", shorttitle="Periodic VWAP (Rich)", overlay=true)
+
+// VWAP Settings
+VWAP_SETTINGS_GROUP = "VWAP Settings"
+BANDS_AND_LINES_SETTING = "Bands and Lines"
+DISTANCE_SETTING = "Distance"
+var anchor = input.string(defval = "Year", title="Anchor Period", options=["Week", "Month", "Quarter", "Year"], group=VWAP_SETTINGS_GROUP)
+src = input(title = "Source", defval = hlc3, group=VWAP_SETTINGS_GROUP, display = display.data_window)
+showBands = input(true, title = "Show Bands?", group = VWAP_SETTINGS_GROUP, display = display.data_window, inline=BANDS_AND_LINES_SETTING)
+showLinesAndLabels = input(true, title = "Show Lines and Labels?", group = VWAP_SETTINGS_GROUP, display = display.data_window, inline=BANDS_AND_LINES_SETTING)
+showDevelopingPeriod = input(true, title = "Show Developing Period?", group = VWAP_SETTINGS_GROUP, display = display.data_window)
+linedistanceright = input.int(defval=40, title='Line', minval=5, maxval=500, group=VWAP_SETTINGS_GROUP, inline=DISTANCE_SETTING)
+labeldistanceright = input.int(defval=20, title='Label', minval=5, maxval=500, group=VWAP_SETTINGS_GROUP, inline=DISTANCE_SETTING)
+
+float bandMult_1 = 1.0
+
+// Volume Check
+cumVolume = ta.cum(volume)
+if barstate.islast and cumVolume == 0
+    runtime.error("No volume is provided by the data vendor.")
+
+// ==== HELPER: Last day of month ====
+lastDayOfMonth(y, m) =>
+    nextMonth = m == 12 ? 1 : m + 1
+    nextYear  = m == 12 ? y + 1 : y
+    tsNextMonth = timestamp(nextYear, nextMonth, 1, 0, 0)
+    dayofmonth(tsNextMonth - 1)
+
+// ==== FUNCTION: Get previous period start & end ====
+getPrevPeriodStartEnd(periodType, time_to_calculate_from) =>
+    currYear  = year(time_to_calculate_from)
+    currMonth = month(time_to_calculate_from)
+    currDay   = dayofmonth(time_to_calculate_from)
+
+    if periodType == "Week"
+        // day of week functions seem to start on Sunday so adjustments needed
+        prevStart = timestamp(currYear, currMonth, currDay - dayofweek(time) + 2 - 7, 0, 0)
+        prevEnd   = timestamp(currYear, currMonth, currDay - dayofweek(time) + 2 - 1, 23, 59)
+        log.info("prevStart: {0} | prevEnd: {1}", prevStart, prevEnd)
+        [prevStart, prevEnd]
+
+    else if periodType == "Month"
+        prevYear  = currMonth == 1 ? currYear - 1 : currYear
+        prevMonth = currMonth == 1 ? 12 : currMonth - 1
+        prevStart = timestamp(prevYear, prevMonth, 1, 0, 0)
+        prevEnd   = timestamp(prevYear, prevMonth, lastDayOfMonth(prevYear, prevMonth), 23, 59)
+        [prevStart, prevEnd]
+
+    else if periodType == "Quarter"
+        // Declare variables before use
+        int startMonth = na
+        int prevYear = na
+
+        if currMonth >= 1 and currMonth <= 3
+            prevYear := currYear - 1
+            startMonth := 10
+        else if currMonth >= 4 and currMonth <= 6
+            prevYear := currYear
+            startMonth := 1
+        else if currMonth >= 7 and currMonth <= 9
+            prevYear := currYear
+            startMonth := 4
+        else
+            prevYear := currYear
+            startMonth := 7
+
+        endMonth = startMonth + 2
+        endYear = prevYear
+        if endMonth > 12
+            endMonth -= 12
+            endYear += 1
+
+        prevStart = timestamp(prevYear, startMonth, 1, 0, 0)
+        prevEnd   = timestamp(endYear, endMonth, lastDayOfMonth(endYear, endMonth), 23, 59)
+        [prevStart, prevEnd]
+
+    else // Year
+        prevStart = timestamp(currYear - 1, 1, 1, 0, 0)
+        prevEnd   = timestamp(currYear - 1, 12, 31, 23, 59)
+        [prevStart, prevEnd]
+
+// ==== GET VARIABLES ====
+[prevStart, prevEnd] = getPrevPeriodStartEnd(anchor, timenow)
+
+// ==== CONDITIONS ====
+withinPrevPeriod = time >= prevStart and time <= prevEnd
+afterPrevPeriod  = time > prevEnd
+
+// New Period Detection
+isNewPeriod = switch anchor
+	"Week"      => timeframe.change("W")
+	"Month"     => timeframe.change("M")
+	"Quarter"   => timeframe.change("3M")
+	"Year"      => timeframe.change("12M")
+	=> false
+
+// Calculate current VWAP and bands
+float vwapValueCurrent = na
+float upperBandValueCurrent = na
+float lowerBandValueCurrent = na
+[_vwap, _stdevUpper, _] = ta.vwap(src, isNewPeriod, 1)
+vwapValueCurrent := _vwap
+stdevAbs = _stdevUpper - _vwap
+//bandBasis = calcModeInput == "Standard Deviation" ? stdevAbs : _vwap * 0.01
+bandBasis = stdevAbs
+upperBandValueCurrent := _vwap + bandBasis * bandMult_1
+lowerBandValueCurrent := _vwap - bandBasis * bandMult_1
+
+// Developing Previous Period VWAP Values
+float vwapValueDevelopingPreviousPeriod = na
+float upperBandValueDevelopingPreviousPeriod = na
+float lowerBandValueDevelopingPreviousPeriod = na
+var timePreviousPeriod = 0
+
+// Previous Period VWAP Values
+float vwapValuePreviousPeriod = na
+float upperBandValuePreviousPeriod = na
+float lowerBandValuePreviousPeriod = na
+
+// Developing Period VWAP Values
+float vwapValueDevelopingPeriod = na
+float upperBandValueDevelopingPeriod = na
+float lowerBandValueDevelopingPeriod = na
+
+// Handle developing period VWAP and bands
+if afterPrevPeriod
+    if isNewPeriod
+        vwapValuePreviousPeriod := vwapValueCurrent[1]
+        upperBandValuePreviousPeriod := upperBandValueCurrent[1]
+        lowerBandValuePreviousPeriod := lowerBandValueCurrent[1]
+        timePreviousPeriod := time
+        
+        vwapValueDevelopingPeriod := vwapValueCurrent
+        upperBandValueDevelopingPeriod := upperBandValueCurrent
+        lowerBandValueDevelopingPeriod := lowerBandValueCurrent
+    else
+        vwapValuePreviousPeriod := vwapValuePreviousPeriod[1]
+        upperBandValuePreviousPeriod := upperBandValuePreviousPeriod[1]
+        lowerBandValuePreviousPeriod := lowerBandValuePreviousPeriod[1]
+
+        vwapValueDevelopingPeriod := vwapValueCurrent
+        upperBandValueDevelopingPeriod := upperBandValueCurrent
+        lowerBandValueDevelopingPeriod := lowerBandValueCurrent
+if withinPrevPeriod
+    if isNewPeriod
+        vwapValueDevelopingPreviousPeriod := vwapValueCurrent
+        upperBandValueDevelopingPreviousPeriod := upperBandValueCurrent
+        lowerBandValueDevelopingPreviousPeriod := lowerBandValueCurrent
+    else
+        vwapValueDevelopingPreviousPeriod := vwapValueCurrent
+        upperBandValueDevelopingPreviousPeriod := upperBandValueCurrent
+        lowerBandValueDevelopingPreviousPeriod := lowerBandValueCurrent
+
+// Plotting
+showDevelopingPreviousPeriodBands = showDevelopingPeriod and showBands
+plot(vwapValueDevelopingPreviousPeriod, title="Developing Previous Period VWAP", color=color.new(color.gray, 75), display=showDevelopingPreviousPeriodBands ? display.all : display.none, style=plot.style_cross)
+upperBandDevelopingPreviousPeriod = plot(upperBandValueDevelopingPreviousPeriod, title="Upper Band Developing Previous Period", color=color.new(color.gray, 75), display=showDevelopingPreviousPeriodBands ? display.all : display.none, editable=showDevelopingPreviousPeriodBands, style=plot.style_stepline)
+lowerBandDevelopingPreviousPeriod = plot(lowerBandValueDevelopingPreviousPeriod, title="Lower Band Developing Previous Period", color=color.new(color.gray, 75), display=showDevelopingPreviousPeriodBands ? display.all : display.none, editable=showDevelopingPreviousPeriodBands, style=plot.style_stepline)
+fill(upperBandDevelopingPreviousPeriod, lowerBandDevelopingPreviousPeriod, title="Bands Fill #1", color=color.new(color.gray, 98), display=showDevelopingPreviousPeriodBands ? display.all : display.none, editable=showDevelopingPreviousPeriodBands)
+
+showDevelopingPeriodBands = showDevelopingPeriod and showBands
+plot(vwapValueDevelopingPeriod, title="Developing Period VWAP", color=color.new(color.gray, 75), display=showDevelopingPeriodBands ? display.all : display.none, style=plot.style_cross)
+upperBandDevelopingPeriod = plot(upperBandValueDevelopingPeriod, title="Upper Band Developing Period", color=color.new(color.gray, 75), display=showDevelopingPeriodBands ? display.all : display.none, editable=showDevelopingPeriodBands, style=plot.style_stepline)
+lowerBandDevelopingPeriod = plot(lowerBandValueDevelopingPeriod, title="Lower Band Developing Period", color=color.new(color.gray, 75), display=showDevelopingPeriodBands ? display.all : display.none, editable=showDevelopingPeriodBands, style=plot.style_stepline)
+fill(upperBandDevelopingPeriod, lowerBandDevelopingPeriod, title="Bands Fill #1", color=color.new(color.gray, 98), display=showDevelopingPeriodBands ? display.all : display.none, editable=showDevelopingPeriodBands)
+
+showPreviousPeriodBands = showBands
+plot(vwapValuePreviousPeriod, title="VWAP Previous Period", color=color.new(color.gray, 50), display=showPreviousPeriodBands ? display.all : display.none, style=plot.style_cross)
+upperBandPreviousPeriod = plot(upperBandValuePreviousPeriod, title="Upper Band Previous Period", color=color.new(color.gray, 50), display=showPreviousPeriodBands ? display.all : display.none, editable=showPreviousPeriodBands, style=plot.style_line)
+lowerBandPreviousPeriod = plot(lowerBandValuePreviousPeriod, title="Lower Band Previous Period", color=color.new(color.gray, 50), display=showPreviousPeriodBands ? display.all : display.none, editable=showPreviousPeriodBands, style=plot.style_line)
+fill(upperBandPreviousPeriod, lowerBandPreviousPeriod, title="Bands Fill Previous Period", color=color.new(color.gray, 95), display=showPreviousPeriodBands ? display.all : display.none, editable=showPreviousPeriodBands)
+
+
+// Function to calculate right limit for lines
+get_limit_right(bars) =>
+    time + (time - time[1]) * bars
+
+//@function Formats a float to maximum 5 characters including decimal point, unless the whole number part exceeds 4 digits, then shows 1 decimal place.
+//@param src The input float number to format
+//@returns Formatted string with capped length
+f_formatFloat(src) =>
+    // Convert to string and split at decimal
+    str = str.tostring(src)
+    parts = str.split(str, ".")
+    whole = array.get(parts, 0)  // Get first element as string
+    frac = array.size(parts) > 1 ? array.get(parts, 1) : ""
+    
+    // If whole number part > 4 chars, round to 1 decimal
+    if str.length(whole) > 4
+        str.format("{0,number,#.0}", src)
+    // Otherwise, limit to 5 chars total
+    else
+        // Calculate available chars for decimal part
+        charsLeft = 5 - str.length(whole) - 1  // -1 for decimal point
+        if charsLeft > 0 and str.length(frac) > 0
+            // Take only needed decimal places
+            fracPart = str.substring(frac, 0, charsLeft)
+            whole + "." + fracPart
+        else
+            whole
+
+// Plot weekly open only on last confirmed bar and appropriate timeframe
+if barstate.islastconfirmedhistory and showLinesAndLabels
+    //can_show_weekly = not timeframe.isweekly and not timeframe.ismonthly
+    //if can_show_weekly
+    line_limit_right = get_limit_right(linedistanceright)
+    label_limit_right = get_limit_right(linedistanceright+labeldistanceright)
+    
+    var previous_period_vwap_line = line.new(x1=timePreviousPeriod, x2=line_limit_right, y1=vwapValuePreviousPeriod, y2=vwapValuePreviousPeriod, color=color.new(color.gray, 50), width=1, xloc=xloc.bar_time, style=line.style_dotted, extend=extend.none)
+    var previous_period_vwap_label = label.new(x=label_limit_right, y=vwapValuePreviousPeriod, text=f_formatFloat(vwapValuePreviousPeriod) + " - p" + anchor + " VWAP", style=label.style_none, textcolor=color.new(color.gray, 75), size=size.small, xloc=xloc.bar_time, textalign=text.align_center)
+    
+    var previous_period_vah_line = line.new(x1=timePreviousPeriod, x2=line_limit_right, y1=upperBandValuePreviousPeriod, y2=upperBandValuePreviousPeriod, color=color.new(color.gray, 50), width=1, xloc=xloc.bar_time, style=line.style_dotted, extend=extend.none)
+    var previous_period_vah_label = label.new(x=label_limit_right, y=upperBandValuePreviousPeriod, text=f_formatFloat(upperBandValuePreviousPeriod) + " - p" + anchor + " VAH", style=label.style_none, textcolor=color.new(color.gray, 50), size=size.small, xloc=xloc.bar_time, textalign=text.align_center)
+    
+    var previous_period_val_line = line.new(x1=timePreviousPeriod, x2=line_limit_right, y1=lowerBandValuePreviousPeriod, y2=lowerBandValuePreviousPeriod, color=color.new(color.gray, 50), width=1, xloc=xloc.bar_time, style=line.style_dotted, extend=extend.none)
+    var previous_period_val_label = label.new(x=label_limit_right, y=lowerBandValuePreviousPeriod, text=f_formatFloat(lowerBandValuePreviousPeriod) + " - p" + anchor + " VAL", style=label.style_none, textcolor=color.new(color.gray, 50), size=size.small, xloc=xloc.bar_time, textalign=text.align_center)
+
+    if showDevelopingPeriod
+        var developing_period_vwap_line = line.new(x1=time, x2=line_limit_right, y1=vwapValueDevelopingPeriod, y2=vwapValueDevelopingPeriod, color=color.new(color.gray, 75), width=1, xloc=xloc.bar_time, style=line.style_dotted, extend=extend.none)
+        var developing_period_vwap_label = label.new(x=label_limit_right, y=vwapValueDevelopingPeriod, text=f_formatFloat(vwapValueDevelopingPeriod) + " - d" + anchor + " VWAP", style=label.style_none, textcolor=color.new(color.gray, 75), size=size.small, xloc=xloc.bar_time, textalign=text.align_center)
+        
+        var developing_period_vah_line = line.new(x1=time, x2=line_limit_right, y1=upperBandValueDevelopingPeriod, y2=upperBandValueDevelopingPeriod, color=color.new(color.gray, 75), width=1, xloc=xloc.bar_time, style=line.style_dotted, extend=extend.none)
+        var developing_period_vah_label = label.new(x=label_limit_right, y=upperBandValueDevelopingPeriod, text=f_formatFloat(upperBandValueDevelopingPeriod) + " - d" + anchor + " VAH", style=label.style_none, textcolor=color.new(color.gray, 75), size=size.small, xloc=xloc.bar_time, textalign=text.align_center)
+
+        var developing_period_val_line = line.new(x1=time, x2=line_limit_right, y1=lowerBandValueDevelopingPeriod, y2=lowerBandValueDevelopingPeriod, color=color.new(color.gray, 75), width=1, xloc=xloc.bar_time, style=line.style_dotted, extend=extend.none)
+        var developing_period_val_label = label.new(x=label_limit_right, y=lowerBandValueDevelopingPeriod, text=f_formatFloat(lowerBandValueDevelopingPeriod) + " - d" + anchor + " VAL", style=label.style_none, textcolor=color.new(color.gray, 75), size=size.small, xloc=xloc.bar_time, textalign=text.align_center)
